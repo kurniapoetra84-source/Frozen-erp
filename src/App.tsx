@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   LayoutDashboard, Package, ShoppingCart, Truck, Users, Building2, Boxes,
   ReceiptText, Wallet, BarChart3, LogOut, Menu, Search, Plus, RefreshCw,
-  AlertTriangle, CalendarClock, Snowflake, ChevronRight, X, Download
+  AlertTriangle, CalendarClock, Snowflake, ChevronRight, X, Download, FileSpreadsheet
 } from "lucide-react";
 import { supabase, isConfigured } from "./lib/supabase";
+import * as XLSX from "xlsx";
 
 type Tab = "dashboard" | "products" | "stock" | "purchases" | "sales" | "customers" | "suppliers" | "expenses" | "reports";
 type Row = Record<string, any>;
@@ -53,6 +54,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState(false);
+  const [importModal, setImportModal] = useState(false);
   const [notice, setNotice] = useState("");
   const [profile, setProfile] = useState<Row | null>(null);
 
@@ -116,16 +118,43 @@ function App() {
       <header className="topbar"><button className="menu-btn" onClick={()=>setMobileNav(true)}><Menu/></button><div><div className="crumb">Frozen ERP <span>/</span> {title}</div><h2>{title}</h2></div><div className="top-actions"><span className="today">{new Date().toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</span><div className="avatar">{(session.user.email||"U").slice(0,1).toUpperCase()}</div></div></header>
       {notice && <div className="notice" onClick={()=>setNotice("")}>{notice}<X size={15}/></div>}
       {tab==="dashboard" ? <Dashboard onNavigate={setTab}/> : tab==="reports" ? <Reports/> : <section className="content">
-        <div className="page-heading"><div><h3>{title}</h3><p>Kelola data {title.toLowerCase()} Frozen ERP.</p></div><button className="primary" onClick={()=>setModal(true)}><Plus size={17}/> Tambah {tab==="products"?"Produk":tab==="customers"?"Pelanggan":tab==="suppliers"?"Supplier":tab==="expenses"?"Biaya":tab==="stock"?"Batch":tab==="sales"?"Pesanan": "Pembelian"}</button></div>
-        <div className="toolbar"><div className="searchbox"><Search size={17}/><input placeholder="Cari data..." value={search} onChange={e=>setSearch(e.target.value)}/></div><button className="outline" onClick={loadData}><RefreshCw size={16}/> Muat ulang</button></div>
+    <div className="page-heading">
+  <div>
+    <h3>{title}</h3>
+    <p>Kelola data {title.toLowerCase()} Frozen ERP.</p>
+  </div>
+
+  <div style={{display:"flex", gap:"10px"}}>
+    {tab === "sales" && (
+      <button className="outline" onClick={() => setImportModal(true)}>
+        <FileSpreadsheet size={17}/> Import Excel
+      </button>
+    )}
+
+    <button className="primary" onClick={() => setModal(true)}>
+      <Plus size={17}/> Tambah {tab==="products"?"Produk":tab==="customers"?"Pelanggan":tab==="suppliers"?"Supplier":tab==="expenses"?"Biaya":tab==="stock"?"Batch":tab==="sales"?"Pesanan":"Pembelian"}
+    </button>
+  </div>
+</div><div className="toolbar"><div className="searchbox"><Search size={17}/><input placeholder="Cari data..." value={search} onChange={e=>setSearch(e.target.value)}/></div><button className="outline" onClick={loadData}><RefreshCw size={16}/> Muat ulang</button></div>
         <div className="table-card"><div className="table-scroll"><table><thead><tr>{columnsFor(tab).map(c=><th key={c.key}>{c.label}</th>)}</tr></thead><tbody>
           {loading ? <tr><td colSpan={8} className="empty">Memuat data...</td></tr> : filtered.length===0 ? <tr><td colSpan={8} className="empty"><Package size={24}/><b>Belum ada data</b><span>Tambahkan data pertama untuk mulai menggunakan modul ini.</span></td></tr> : filtered.map((r,i)=><tr key={r.id||i}>{columnsFor(tab).map(c=><td key={c.key}>{c.render ? c.render(r[c.key],r) : String(r[c.key] ?? "-")}</td>)}</tr>)}
         </tbody></table></div><div className="table-footer">Menampilkan {filtered.length} data <span>Limit tampilan 100 baris</span></div></div>
       </section>}
       <footer>Frozen ERP <span>•</span> Versi awal 0.1.0 <span>•</span> Data tersimpan di Supabase</footer>
     </main>
-    {modal && <EntryModal tab={tab} onClose={()=>setModal(false)} onSave={saveRecord}/>}
-  </div>;
+ {modal && <EntryModal tab={tab} onClose={()=>setModal(false)} onSave={saveRecord}/>}
+
+{importModal && (
+  <SalesImportModal
+    onClose={() => setImportModal(false)}
+    onSuccess={(count) => {
+      setImportModal(false);
+      setNotice(`Berhasil mengimpor ${count} pesanan.`);
+      loadData();
+    }}
+  />
+)}
+</div>;
 }
 
 function columnsFor(tab: Tab) {
@@ -170,8 +199,187 @@ function Reports() {
     ["Utang Supplier","Saldo tagihan supplier","supplier_bills"]
   ].map(x=><div className="report-card" key={x[0]}><BarChart3 size={21}/><b>{x[0]}</b><span>{x[1]}</span><small>Tabel: {x[2]}</small></div>)}</div><div className="info-banner"><Download size={20}/><div><b>Ekspor laporan</b><span>Ekspor CSV/Excel dan PDF akan ditambahkan pada tahap berikutnya setelah alur transaksi dan data master tervalidasi.</span></div></div></section>;
 }
+function SalesImportModal({
+  onClose,
+  onSuccess
+}: {
+  onClose: () => void;
+  onSuccess: (count: number) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
-function EntryModal({tab,onClose,onSave}:{tab:Tab;onClose:()=>void;onSave:(v:Row)=>void}) {
+  async function processExcel() {
+    const db = supabase;
+
+    if (!file || !db) {
+      setMessage("Pilih file Excel terlebih dahulu.");
+      return;
+    }
+
+    setLoading(true);
+    setMessage("Sedang membaca Excel...");
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, {
+        type: "array",
+        cellDates: true
+      });
+
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<any>(sheet, {
+        defval: ""
+      });
+
+      if (!rows.length) {
+        throw new Error("File Excel kosong.");
+      }
+
+      const { data: customers, error: customerError } =
+        await db.from("customers").select("id,name");
+
+      if (customerError) throw customerError;
+
+      const { data: products, error: productError } =
+        await db.from("products").select("id,name,sku");
+
+      if (productError) throw productError;
+
+      const grouped: Record<string, any> = {};
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+
+        const get = (name: string) => {
+          const key = Object.keys(row).find(
+            k => k.trim().toLowerCase() === name.toLowerCase()
+          );
+          return key ? row[key] : "";
+        };
+
+        const customerName = String(get("Customer")).trim();
+        const productName = String(get("Product")).trim();
+        const principal = String(get("Principal")).trim();
+        const qty = Number(get("Qty"));
+        const price = Number(get("Harga"));
+        const rawDate = get("Tanggal");
+
+        let orderDate = "";
+
+        if (rawDate instanceof Date) {
+          orderDate = [
+            rawDate.getFullYear(),
+            String(rawDate.getMonth() + 1).padStart(2, "0"),
+            String(rawDate.getDate()).padStart(2, "0")
+          ].join("-");
+        } else {
+          const dateText = String(rawDate).trim();
+          const match = dateText.match(
+            /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/
+          );
+
+          orderDate = match
+            ? `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`
+            : dateText;
+        }
+
+        const customer = customers?.find(
+          c => c.name.trim().toLowerCase() === customerName.toLowerCase()
+        );
+
+        const product = products?.find(
+          p =>
+            p.name.trim().toLowerCase() === productName.toLowerCase() ||
+            String(p.sku || "").trim().toLowerCase() === productName.toLowerCase()
+        );
+
+        if (!customer) {
+          throw new Error(`Baris ${i + 2}: Customer tidak ditemukan: ${customerName}`);
+        }
+
+        if (!product) {
+          throw new Error(`Baris ${i + 2}: Produk tidak ditemukan: ${productName}`);
+        }
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(orderDate)) {
+          throw new Error(`Baris ${i + 2}: Tanggal tidak valid.`);
+        }
+
+        if (!(qty > 0) || !Number.isFinite(price) || price < 0) {
+          throw new Error(`Baris ${i + 2}: Qty atau Harga tidak valid.`);
+        }
+
+        const key = `${customer.id}_${orderDate}`;
+
+        if (!grouped[key]) {
+          grouped[key] = {
+            customer_id: customer.id,
+            customer_name: customer.name,
+            order_date: orderDate,
+            lines: []
+          };
+        }
+
+        grouped[key].lines.push({
+          product_id: product.id,
+          qty,
+          unit_price: price,
+          principal
+        });
+      }
+
+      const orders = Object.values(grouped);
+
+      const { data, error } = await db.rpc(
+        "import_sales_orders",
+        { p_orders: orders }
+      );
+
+      if (error) throw error;
+
+      onSuccess(Number(data));
+    } catch (error: any) {
+      setMessage(error.message || "Import Excel gagal.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal">
+        <h3>Import Penjualan dari Excel</h3>
+        <p>Pilih file Excel transaksi penjualan.</p>
+
+        <input
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={e => setFile(e.target.files?.[0] || null)}
+        />
+
+        {message && <p>{message}</p>}
+
+        <div className="modal-actions">
+          <button className="outline" onClick={onClose}>
+            Batal
+          </button>
+
+          <button
+            className="primary"
+            onClick={processExcel}
+            disabled={!file || loading}
+          >
+            {loading ? "Memproses..." : "Import Penjualan"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ function EntryModal({tab,onClose,onSave}:{tab:Tab;onClose:()=>void;onSave:(v:Row)=>void}) {
   const [values,setValues]=useState<Row>({});
   const [busy,setBusy]=useState(false);
   const fields:Record<string,{key:string;label:string;type?:string;required?:boolean}[]> = {
