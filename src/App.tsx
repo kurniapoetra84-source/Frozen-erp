@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Package, ShoppingCart, Truck, Users, Building2, Boxes,
   ReceiptText, Wallet, BarChart3, LogOut, Menu, Search, Plus, RefreshCw,
   AlertTriangle, CalendarClock, Snowflake, ChevronRight, X, Download, FileSpreadsheet
-} from "lucide-react";
+} from "lucide-react";'
 import { supabase, isConfigured } from "./lib/supabase";
 import * as XLSX from "xlsx";
 
